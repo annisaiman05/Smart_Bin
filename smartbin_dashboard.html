@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SmartBin Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;500;700;800&display=swap" rel="stylesheet"/>
+
+  <!-- Firebase SDK -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getDatabase, ref, onValue, set, push, serverTimestamp, get }
+      from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+    import { getAuth, signInWithEmailAndPassword }
+      from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+
+    // ─── Firebase Config ─────────────────────────────────────────
+    const firebaseConfig = {
+      apiKey:      "AIzaSyCBgn8h3q9sG-aeHd6VLaj-YElsydB_uNc",
+      authDomain:  "smartbin-656a5.firebaseapp.com",
+      databaseURL: "https://smartbin-656a5-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId:   "smartbin-656a5",
+    };
+
+    const app  = initializeApp(firebaseConfig);
+    const db   = getDatabase(app);
+    const auth = getAuth(app);
+
+    // ─── Auth ─────────────────────────────────────────────────────
+    async function signIn() {
+      try {
+        await signInWithEmailAndPassword(auth, "esp32@smartbin.com", "smartbin123");
+        setStatus("CONNECTED", true);
+        startListeners();
+        loadHistory();
+      } catch (e) {
+        setStatus("AUTH ERROR", false);
+        console.error(e);
+      }
+    }
+
+    // ─── Status ───────────────────────────────────────────────────
+    function setStatus(msg, ok) {
+      document.getElementById("statusText").textContent = msg;
+      document.getElementById("statusDot").style.background = ok ? "#39d353" : "#f85149";
+      document.getElementById("statusDot").style.boxShadow  = ok
+        ? "0 0 8px #39d353" : "0 0 8px #f85149";
+    }
+
+    // ─── Live Listeners ───────────────────────────────────────────
+    function startListeners() {
+      // /current/type
+      onValue(ref(db, "/current/type"), snap => {
+        const val = snap.val() || "Insert Waste";
+        updateType(val);
+      });
+
+      // /current/confidence
+      onValue(ref(db, "/current/confidence"), snap => {
+        const val = snap.val() || 0;
+        updateConfidence(val);
+      });
+
+      // /current/weight (if your ESP32 writes weight here too)
+      onValue(ref(db, "/current/weight"), snap => {
+        const val = snap.val() || 0;
+        updateWeight(val);
+      });
+    }
+
+    // ─── Load History ─────────────────────────────────────────────
+    async function loadHistory() {
+      const snap = await get(ref(db, "/history"));
+      if (!snap.exists()) { renderHistory([]); return; }
+      const raw = snap.val();
+      const items = Object.entries(raw)
+        .sort(([a],[b]) => a.localeCompare(b))
+        .map(([key, v]) => ({ key, ...v }));
+      renderHistory(items);
+      updateStats(items);
+    }
+
+    // ─── History listener (real-time new items) ───────────────────
+    onValue(ref(db, "/history"), snap => {
+      if (!snap.exists()) { renderHistory([]); return; }
+      const raw = snap.val();
+      const items = Object.entries(raw)
+        .sort(([a],[b]) => a.localeCompare(b))
+        .map(([key, v]) => ({ key, ...v }));
+      renderHistory(items);
+      updateStats(items);
+    });
+
+    // ─── Expose to window for UI buttons ─────────────────────────
+    window._fb = { db, ref, set, push, serverTimestamp };
+    window.fbReady = false;
+
+    signIn().then(() => { window.fbReady = true; });
+  </script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #080c10;
+      --s1:       #0e1419;
+      --s2:       #141b24;
+      --s3:       #1a2330;
+      --border:   rgba(255,255,255,.07);
+      --border2:  rgba(255,255,255,.12);
+      --green:    #39d353;
+      --blue:     #58a6ff;
+      --amber:    #f0a500;
+      --red:      #f85149;
+      --cyan:     #56d3c8;
+      --text:     #e8edf3;
+      --muted:    #7a8a9a;
+      --mono:     'Space Mono', monospace;
+      --display:  'Syne', sans-serif;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--display);
+      min-height: 100vh;
+      line-height: 1.5;
+    }
+
+    /* ── NAV ── */
+    nav {
+      position: sticky; top: 0; z-index: 100;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 2rem; height: 60px;
+      background: rgba(8,12,16,.85);
+      backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-logo {
+      display: flex; align-items: center; gap: 10px;
+      font-family: var(--mono); font-weight: 700; font-size: 14px;
+      letter-spacing: 2px; color: var(--text);
+    }
+    .nav-logo-icon {
+      width: 32px; height: 32px;
+      border: 1.5px solid var(--green); border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .nav-logo-icon svg { width: 16px; height: 16px; stroke: var(--green); fill: none; stroke-width: 2; }
+
+    .nav-status {
+      display: flex; align-items: center; gap: 8px;
+      font-family: var(--mono); font-size: 11px; color: var(--muted);
+    }
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--amber); box-shadow: 0 0 8px var(--amber);
+      animation: blink 1.5s ease infinite;
+    }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+    .nav-links {
+      display: flex; gap: 24px; list-style: none;
+    }
+    .nav-links a {
+      font-size: 13px; color: var(--muted); text-decoration: none;
+      transition: color .2s; font-family: var(--mono);
+    }
+    .nav-links a:hover { color: var(--text); }
+
+    /* ── HERO ── */
+    .hero {
+      padding: 5rem 2rem 3rem;
+      text-align: center;
+      position: relative; overflow: hidden;
+    }
+    .hero::before {
+      content: '';
+      position: absolute; inset: 0;
+      background: radial-gradient(ellipse 60% 40% at 50% 0%, rgba(57,211,83,.06) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .hero-tag {
+      display: inline-block; font-family: var(--mono); font-size: 11px;
+      letter-spacing: 3px; color: var(--green); text-transform: uppercase;
+      border: 1px solid rgba(57,211,83,.3); padding: 4px 12px; border-radius: 20px;
+      margin-bottom: 1.5rem;
+    }
+    .hero h1 {
+      font-size: clamp(2.5rem, 6vw, 4.5rem); font-weight: 800;
+      line-height: 1.05; letter-spacing: -2px;
+      margin-bottom: 1rem;
+    }
+    .hero h1 span { color: var(--green); }
+    .hero p {
+      font-family: var(--mono); font-size: 13px; color: var(--muted);
+      max-width: 480px; margin: 0 auto 2rem; line-height: 1.8;
+    }
+    .hero-btns {
+      display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;
+    }
+    .btn-primary {
+      padding: 12px 28px; border-radius: 8px; border: none; cursor: pointer;
+      font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: 1px;
+      background: var(--green); color: #080c10; transition: all .2s;
+      text-decoration: none; display: inline-block;
+    }
+    .btn-primary:hover { background: #56e870; transform: translateY(-1px); }
+    .btn-secondary {
+      padding: 11px 28px; border-radius: 8px; cursor: pointer;
+      font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: 1px;
+      background: transparent; color: var(--text);
+      border: 1px solid var(--border2); transition: all .2s;
+      text-decoration: none; display: inline-block;
+    }
+    .btn-secondary:hover { border-color: var(--text); }
+
+    /* ── SECTIONS ── */
+    section { max-width: 1100px; margin: 0 auto; padding: 4rem 2rem; }
+    .section-label {
+      font-family: var(--mono); font-size: 11px; letter-spacing: 3px;
+      color: var(--green); text-transform: uppercase; margin-bottom: 1rem;
+    }
+    .section-title {
+      font-size: clamp(1.6rem, 3vw, 2.2rem); font-weight: 700;
+      letter-spacing: -1px; margin-bottom: .5rem;
+    }
+    .section-sub {
+      font-family: var(--mono); font-size: 12px; color: var(--muted);
+      margin-bottom: 2.5rem; max-width: 560px;
+    }
+
+    /* ── DASHBOARD GRID ── */
+    .dash-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    @media(max-width:700px){ .dash-grid{ grid-template-columns:1fr 1fr; } }
+
+    .card {
+      background: var(--s1); border: 1px solid var(--border);
+      border-radius: 12px; padding: 20px;
+      position: relative; overflow: hidden;
+      transition: border-color .2s;
+    }
+    .card:hover { border-color: var(--border2); }
+    .card-accent {
+      position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    }
+    .card-label {
+      font-family: var(--mono); font-size: 10px; letter-spacing: 2px;
+      text-transform: uppercase; color: var(--muted); margin-bottom: 10px;
+    }
+    .card-value {
+      font-family: var(--mono); font-size: 2.2rem; font-weight: 700;
+      line-height: 1; color: var(--text);
+    }
+    .card-value small { font-size: 1rem; color: var(--muted); font-weight: 400; }
+    .card-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 12px; border-radius: 6px; font-family: var(--mono);
+      font-size: 12px; font-weight: 700; margin-top: 4px;
+    }
+
+    /* ── CONFIDENCE BAR ── */
+    .conf-bar-wrap { margin-top: 10px; }
+    .conf-bar-track {
+      width: 100%; height: 6px; background: var(--s3);
+      border-radius: 3px; overflow: hidden;
+    }
+    .conf-bar-fill {
+      height: 100%; border-radius: 3px;
+      background: linear-gradient(90deg, var(--green), var(--cyan));
+      transition: width .6s ease;
+    }
+    .conf-label {
+      display: flex; justify-content: space-between;
+      font-family: var(--mono); font-size: 10px; color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    /* ── OLED ── */
+    .oled-card { grid-column: span 2; }
+    @media(max-width:700px){ .oled-card{ grid-column: span 2; } }
+    .oled {
+      background: #060806;
+      border: 2px solid #1a2a1a;
+      border-radius: 8px;
+      padding: 14px 18px;
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 2;
+      color: #66ff66;
+      box-shadow: inset 0 0 30px rgba(0,255,0,.04), 0 0 20px rgba(0,255,0,.02);
+      margin-top: 10px;
+    }
+    .oled-hdr {
+      font-size: 11px; letter-spacing: 3px;
+      border-bottom: 1px solid #1a2a1a; padding-bottom: 6px; margin-bottom: 6px;
+      color: #44cc44;
+    }
+    .oled-row { display: flex; justify-content: space-between; }
+    .oled-muted { color: #3a6a3a; }
+
+    /* ── TWO-COL ── */
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+    @media(max-width:700px){ .two-col{ grid-template-columns:1fr; } }
+
+    /* ── SERVO PANEL ── */
+    .servo-grid {
+      display: grid; grid-template-columns: repeat(4,1fr); gap: 8px; margin-top: 10px;
+    }
+    .servo-item {
+      background: var(--s2); border: 1px solid var(--border);
+      border-radius: 8px; padding: 12px 8px; text-align: center;
+    }
+    .servo-ch {
+      font-family: var(--mono); font-size: 10px; color: var(--muted);
+      letter-spacing: 1px; margin-bottom: 8px; text-transform: uppercase;
+    }
+    .servo-dial { width: 52px; height: 34px; margin: 0 auto 6px; }
+    .servo-dial svg { width: 100%; height: 100%; }
+    .servo-val {
+      font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--text);
+    }
+    .servo-name { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+    /* ── CHART BARS ── */
+    .dist-bars { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+    .dist-row { display: flex; align-items: center; gap: 10px; }
+    .dist-lbl {
+      font-family: var(--mono); font-size: 11px; color: var(--muted);
+      width: 68px; flex-shrink: 0;
+    }
+    .dist-track {
+      flex: 1; height: 16px; background: var(--s3); border-radius: 3px; overflow: hidden;
+    }
+    .dist-fill { height: 100%; border-radius: 3px; transition: width .8s ease; }
+    .dist-num {
+      font-family: var(--mono); font-size: 11px; color: var(--muted);
+      width: 24px; text-align: right;
+    }
+
+    /* ── HISTORY ── */
+    .history-list {
+      display: flex; flex-direction: column; gap: 6px;
+      max-height: 280px; overflow-y: auto;
+      margin-top: 12px;
+    }
+    .history-list::-webkit-scrollbar { width: 4px; }
+    .history-list::-webkit-scrollbar-track { background: transparent; }
+    .history-list::-webkit-scrollbar-thumb { background: var(--s3); border-radius: 2px; }
+    .history-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 12px; background: var(--s2); border-radius: 7px;
+      font-size: 12px; border: 1px solid transparent;
+      transition: border-color .2s;
+    }
+    .history-item:hover { border-color: var(--border); }
+    .history-item.new-item { animation: slideIn .4s ease; }
+    @keyframes slideIn {
+      from { opacity:0; transform: translateX(-8px); }
+      to   { opacity:1; transform: translateX(0); }
+    }
+    .h-idx { font-family: var(--mono); font-size: 10px; color: var(--muted); width: 32px; }
+    .h-w   { font-family: var(--mono); color: var(--text); margin-left: auto; }
+    .h-ts  { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+
+    /* ── ACTIONS ── */
+    .action-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-top: 2rem; }
+    @media(max-width:600px){ .action-grid{ grid-template-columns:1fr 1fr; } }
+    .action-btn {
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+      padding: 18px 12px; border-radius: 10px; border: 1px solid var(--border);
+      background: var(--s1); cursor: pointer; transition: all .2s;
+      font-family: var(--mono); font-size: 11px; letter-spacing: 1px;
+      text-transform: uppercase; color: var(--muted);
+    }
+    .action-btn:hover { border-color: var(--border2); color: var(--text); background: var(--s2); }
+    .action-btn svg { width: 22px; height: 22px; stroke-width: 1.5; stroke: currentColor; fill: none; }
+    .action-btn.green { border-color: rgba(57,211,83,.3); color: var(--green); }
+    .action-btn.green:hover { background: rgba(57,211,83,.07); border-color: var(--green); }
+    .action-btn.red { border-color: rgba(248,81,73,.3); color: var(--red); }
+    .action-btn.red:hover { background: rgba(248,81,73,.07); border-color: var(--red); }
+
+    /* ── TOAST ── */
+    #toast {
+      position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%) translateY(20px);
+      background: var(--s2); border: 1px solid var(--border2);
+      font-family: var(--mono); font-size: 12px; letter-spacing: 1px;
+      padding: 10px 20px; border-radius: 8px; z-index: 9999;
+      opacity: 0; transition: all .3s; pointer-events: none;
+      white-space: nowrap;
+    }
+    #toast.show { opacity:1; transform: translateX(-50%) translateY(0); }
+
+    /* ── HOW IT WORKS ── */
+    .steps { display: grid; grid-template-columns: repeat(4,1fr); gap: 16px; }
+    @media(max-width:700px){ .steps{ grid-template-columns:1fr 1fr; } }
+    .step-card {
+      background: var(--s1); border: 1px solid var(--border);
+      border-radius: 10px; padding: 20px 16px;
+    }
+    .step-num {
+      font-family: var(--mono); font-size: 11px; color: var(--green);
+      margin-bottom: 10px; letter-spacing: 2px;
+    }
+    .step-title { font-size: 14px; font-weight: 700; margin-bottom: 6px; }
+    .step-desc { font-family: var(--mono); font-size: 11px; color: var(--muted); line-height: 1.7; }
+
+    /* ── PIN MAP ── */
+    .pin-table {
+      width: 100%; border-collapse: collapse;
+      font-family: var(--mono); font-size: 12px;
+    }
+    .pin-table th {
+      text-align: left; padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
+      color: var(--muted);
+    }
+    .pin-table td {
+      padding: 10px 14px; border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    .pin-table tr:last-child td { border-bottom: none; }
+    .pin-table tr:hover td { background: var(--s2); }
+    .pin-chip {
+      display: inline-block; background: var(--s3); border: 1px solid var(--border);
+      padding: 2px 8px; border-radius: 4px; font-size: 11px; color: var(--cyan);
+    }
+
+    /* ── FOOTER ── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem; text-align: center;
+      font-family: var(--mono); font-size: 11px; color: var(--muted);
+    }
+    footer a { color: var(--green); text-decoration: none; }
+
+    /* ── BADGE STYLES ── */
+    .b-paper    { background: rgba(86,211,100,.12); color: #56d364; border: 1px solid rgba(86,211,100,.3); }
+    .b-plastic  { background: rgba(88,166,255,.12); color: #58a6ff; border: 1px solid rgba(88,166,255,.3); }
+    .b-aluminum { background: rgba(240,165,0,.12);  color: #f0a500; border: 1px solid rgba(240,165,0,.3); }
+    .b-unknown  { background: rgba(248,81,73,.12);  color: #f85149; border: 1px solid rgba(248,81,73,.3); }
+    .b-waiting  { background: rgba(122,138,154,.1); color: #7a8a9a; border: 1px solid rgba(122,138,154,.2); }
+
+    .dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+    .d-green  { background: var(--green); }
+    .d-blue   { background: var(--blue); }
+    .d-amber  { background: var(--amber); }
+    .d-red    { background: var(--red); }
+    .d-muted  { background: var(--muted); }
+  </style>
+</head>
+<body>
+
+<!-- ── NAV ── -->
+<nav>
+  <div class="nav-logo">
+    <div class="nav-logo-icon">
+      <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+    </div>
+    SMARTBIN
+  </div>
+  <ul class="nav-links">
+    <li><a href="#dashboard">Dashboard</a></li>
+    <li><a href="#history">History</a></li>
+    <li><a href="#hardware">Hardware</a></li>
+  </ul>
+  <div class="nav-status">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">CONNECTING</span>
+  </div>
+</nav>
+
+<!-- ── HERO ── -->
+<div class="hero">
+  <div class="hero-tag">IoT Waste Management System</div>
+  <h1>Smart<span>Bin</span><br/>Dashboard</h1>
+  <p>Real-time ESP32 monitoring · Firebase RTDB · AI waste classification · Servo sorting</p>
+  <div class="hero-btns">
+    <a href="#dashboard" class="btn-primary">Open Dashboard</a>
+    <a href="#hardware" class="btn-secondary">View Hardware</a>
+  </div>
+</div>
+
+<!-- ── DASHBOARD ── -->
+<section id="dashboard">
+  <div class="section-label">Live Data</div>
+  <div class="section-title">Real-Time Dashboard</div>
+  <div class="section-sub">Connected to Firebase RTDB · /current · Updates every second via ESP32</div>
+
+  <!-- Metric Cards -->
+  <div class="dash-grid">
+    <div class="card">
+      <div class="card-accent" style="background: linear-gradient(90deg,#58a6ff,transparent)"></div>
+      <div class="card-label">Current Weight</div>
+      <div class="card-value" id="weightVal">0<small> g</small></div>
+    </div>
+    <div class="card">
+      <div class="card-accent" style="background: linear-gradient(90deg,#f0a500,transparent)"></div>
+      <div class="card-label">Detected Type</div>
+      <div style="margin-top:8px" id="typeBadge">
+        <span class="card-badge b-waiting"><span class="dot d-muted"></span>Insert Waste</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-accent" style="background: linear-gradient(90deg,#39d353,transparent)"></div>
+      <div class="card-label">Confidence</div>
+      <div class="card-value" id="confVal">0<small>%</small></div>
+      <div class="conf-bar-wrap">
+        <div class="conf-label"><span>AI Score</span><span id="confPct">0%</span></div>
+        <div class="conf-bar-track">
+          <div class="conf-bar-fill" id="confBar" style="width:0%"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card oled-card">
+      <div class="card-accent" style="background: linear-gradient(90deg,#39d353,#56d3c8,transparent)"></div>
+      <div class="card-label">OLED Preview · 128×64 SSD1306</div>
+      <div class="oled">
+        <div class="oled-hdr">SMART WASTE BIN</div>
+        <div class="oled-row">
+          <span class="oled-muted">Type  :</span>
+          <span id="oledType">Insert Waste</span>
+        </div>
+        <div class="oled-row">
+          <span class="oled-muted">Weight:</span>
+          <span id="oledWeight">0 g</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-accent" style="background: linear-gradient(90deg,#f85149,transparent)"></div>
+      <div class="card-label">Total Sorted</div>
+      <div class="card-value" id="totalSorted">0</div>
+    </div>
+  </div>
+
+  <!-- Servo Panel -->
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-accent" style="background: linear-gradient(90deg,#56d3c8,transparent)"></div>
+    <div class="card-label">Servo Motors · PCA9685 @ 0x40 · I²C</div>
+    <div class="servo-grid" id="servoGrid"></div>
+  </div>
+
+  <!-- Distribution + History -->
+  <div class="two-col" id="history">
+    <div class="card">
+      <div class="card-label">Distribution</div>
+      <div class="dist-bars" id="distChart"></div>
+    </div>
+    <div class="card">
+      <div class="card-label">History Log · /history/item###</div>
+      <div class="history-list" id="historyList">
+        <div style="text-align:center;padding:2rem;font-family:var(--mono);font-size:12px;color:var(--muted)">
+          Waiting for data...
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Actions -->
+  <div class="card">
+    <div class="card-label">Controls · Simulate ESP32 Button Actions</div>
+    <div class="action-grid">
+      <button class="action-btn green" onclick="handleSave()">
+        <svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+        Save & Sort
+      </button>
+      <button class="action-btn" onclick="handleTare()">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
+        Tare Scale
+      </button>
+      <button class="action-btn" onclick="handleRefresh()">
+        <svg viewBox="0 0 24 24"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+        Refresh
+      </button>
+      <button class="action-btn" onclick="simulateScan()">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        Simulate Scan
+      </button>
+      <button class="action-btn red" onclick="handleReset()">
+        <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>
+        Reset /current
+      </button>
+      <button class="action-btn" onclick="handleClearHistory()">
+        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        Clear History
+      </button>
+    </div>
+  </div>
+</section>
+
+<!-- ── HOW IT WORKS ── -->
+<section>
+  <div class="section-label">System Flow</div>
+  <div class="section-title">How It Works</div>
+  <div class="section-sub">End-to-end IoT pipeline from camera to sorted compartment</div>
+  <div class="steps">
+    <div class="step-card">
+      <div class="step-num">01 — SCAN</div>
+      <div class="step-title">Camera Captures</div>
+      <div class="step-desc">ESP32-CAM or Python script takes a photo of the waste placed on the scale tray.</div>
+    </div>
+    <div class="step-card">
+      <div class="step-num">02 — CLASSIFY</div>
+      <div class="step-title">AI Identifies Type</div>
+      <div class="step-desc">ML model classifies into Paper, Plastic, Aluminum, or Unknown. Writes to /current/type in Firebase.</div>
+    </div>
+    <div class="step-card">
+      <div class="step-num">03 — WEIGH</div>
+      <div class="step-title">HX711 Reads Mass</div>
+      <div class="step-desc">Load cell reads weight continuously. OLED updates live. Button press confirms.</div>
+    </div>
+    <div class="step-card">
+      <div class="step-num">04 — SORT</div>
+      <div class="step-title">Servos Route Waste</div>
+      <div class="step-desc">PCA9685 drives 4 servos in sequence to direct the item to the correct compartment.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ── HARDWARE ── -->
+<section id="hardware">
+  <div class="section-label">Pin Reference</div>
+  <div class="section-title">Hardware Map</div>
+  <div class="section-sub">ESP32 pin assignments as defined in your firmware</div>
+  <div class="card">
+    <table class="pin-table">
+      <thead>
+        <tr>
+          <th>Component</th>
+          <th>Pin / Address</th>
+          <th>Value</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>HX711 DOUT</td><td><span class="pin-chip">GPIO 16</span></td><td>Input</td><td>Load cell data</td></tr>
+        <tr><td>HX711 SCK</td><td><span class="pin-chip">GPIO 4</span></td><td>Output</td><td>Load cell clock</td></tr>
+        <tr><td>Button</td><td><span class="pin-chip">GPIO 18</span></td><td>INPUT_PULLUP</td><td>Confirm & sort</td></tr>
+        <tr><td>I²C SDA</td><td><span class="pin-chip">GPIO 21</span></td><td>I²C</td><td>OLED + PCA9685</td></tr>
+        <tr><td>I²C SCL</td><td><span class="pin-chip">GPIO 22</span></td><td>I²C</td><td>OLED + PCA9685</td></tr>
+        <tr><td>OLED SSD1306</td><td><span class="pin-chip">0x3C</span></td><td>128×64</td><td>Status display</td></tr>
+        <tr><td>PCA9685</td><td><span class="pin-chip">0x40</span></td><td>50Hz PWM</td><td>Servo driver</td></tr>
+        <tr><td>Servo 1</td><td><span class="pin-chip">CH 0</span></td><td>90° center</td><td>Main gate</td></tr>
+        <tr><td>Servo 2</td><td><span class="pin-chip">CH 4</span></td><td>90° center</td><td>Main gate (mirror)</td></tr>
+        <tr><td>Servo 3</td><td><span class="pin-chip">CH 8</span></td><td>90° center</td><td>Paper / Plastic split</td></tr>
+        <tr><td>Servo 4</td><td><span class="pin-chip">CH 15</span></td><td>90° center</td><td>Aluminum / Unknown split</td></tr>
+        <tr><td>Calibration Factor</td><td><span class="pin-chip">471.497</span></td><td>HX711</td><td>Adjust per load cell</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  <p>SmartBin · ESP32 + Firebase RTDB · Built with ♥ · <a href="https://firebase.google.com" target="_blank">Firebase Console</a></p>
+</footer>
+
+<div id="toast"></div>
+
+<!-- ── APP LOGIC ── -->
+<script>
+  // ─── State ─────────────────────────────────────────────────────
+  let currentWeight = 0;
+  let currentType   = "Insert Waste";
+  let currentConf   = 0;
+  let historyItems  = [];
+  let servoAngles   = [90, 90, 90, 90];
+
+  const SERVO_DEFS = [
+    { name: "Main Gate", ch: "CH0"  },
+    { name: "Main Gate", ch: "CH4"  },
+    { name: "Paper/Plas", ch: "CH8"  },
+    { name: "Alu/Unknwn", ch: "CH15" },
+  ];
+
+  const TYPE_BADGE = {
+    "Paper":        'b-paper',
+    "Plastic":      'b-plastic',
+    "Aluminum":     'b-aluminum',
+    "Unknown":      'b-unknown',
+    "Insert Waste": 'b-waiting',
+    "Waiting...":   'b-waiting',
+  };
+  const TYPE_DOT = {
+    "Paper": 'd-green', "Plastic": 'd-blue',
+    "Aluminum": 'd-amber', "Unknown": 'd-red',
+    "Insert Waste": 'd-muted', "Waiting...": 'd-muted',
+  };
+  const DIST_COLOR = {
+    Paper: '#39d353', Plastic: '#58a6ff', Aluminum: '#f0a500', Unknown: '#f85149'
+  };
+
+  // ─── Toast ─────────────────────────────────────────────────────
+  function toast(msg, color = '#39d353') {
+    const el = document.getElementById('toast');
+    el.textContent = msg.toUpperCase();
+    el.style.borderColor = color;
+    el.style.color = color;
+    el.classList.add('show');
+    setTimeout(() => el.classList.remove('show'), 2500);
+  }
+
+  // ─── Update Type ───────────────────────────────────────────────
+  window.updateType = function(val) {
+    currentType = val;
+    const cls  = TYPE_BADGE[val] || 'b-unknown';
+    const dot  = TYPE_DOT[val]   || 'd-muted';
+    document.getElementById('typeBadge').innerHTML =
+      `<span class="card-badge ${cls}"><span class="dot ${dot}"></span>${val}</span>`;
+    document.getElementById('oledType').textContent = val;
+  };
+
+  // ─── Update Weight ─────────────────────────────────────────────
+  window.updateWeight = function(val) {
+    currentWeight = Math.max(0, Math.round(val));
+    document.getElementById('weightVal').innerHTML = `${currentWeight}<small> g</small>`;
+    document.getElementById('oledWeight').textContent = `${currentWeight} g`;
+  };
+
+  // ─── Update Confidence ─────────────────────────────────────────
+  window.updateConfidence = function(val) {
+    currentConf = Math.round(val * 100);
+    if (val <= 1 && val > 0) currentConf = Math.round(val * 100);
+    else if (val > 1) currentConf = Math.round(val);
+    document.getElementById('confVal').innerHTML = `${currentConf}<small>%</small>`;
+    document.getElementById('confPct').textContent = `${currentConf}%`;
+    document.getElementById('confBar').style.width = `${currentConf}%`;
+  };
+
+  // ─── Render Servos ─────────────────────────────────────────────
+  function renderServos() {
+    const grid = document.getElementById('servoGrid');
+    grid.innerHTML = '';
+    SERVO_DEFS.forEach((s, i) => {
+      const angle = servoAngles[i];
+      const rad   = (angle - 90) * Math.PI / 180;
+      const nx    = 26 + 18 * Math.sin(rad);
+      const ny    = 26 - 18 * Math.cos(rad);
+      const col   = angle === 90 ? '#7a8a9a' : (angle > 90 ? '#f0a500' : '#58a6ff');
+      grid.innerHTML += `
+        <div class="servo-item">
+          <div class="servo-ch">${s.ch}</div>
+          <div class="servo-dial">
+            <svg viewBox="0 0 52 34">
+              <path d="M 8 30 A 18 18 0 0 1 44 30" fill="none" stroke="#1a2330" stroke-width="3.5" stroke-linecap="round"/>
+              <line x1="26" y1="26" x2="${nx.toFixed(1)}" y2="${ny.toFixed(1)}"
+                stroke="${col}" stroke-width="2.5" stroke-linecap="round"/>
+              <circle cx="26" cy="26" r="3.5" fill="${col}"/>
+            </svg>
+          </div>
+          <div class="servo-val">${angle}°</div>
+          <div class="servo-name">${s.name}</div>
+        </div>`;
+    });
+  }
+
+  // ─── Render History ────────────────────────────────────────────
+  window.renderHistory = function(items) {
+    historyItems = items;
+    document.getElementById('totalSorted').textContent = items.length;
+    const list = document.getElementById('historyList');
+    if (items.length === 0) {
+      list.innerHTML = '<div style="text-align:center;padding:2rem;font-family:var(--mono);font-size:12px;color:var(--muted)">No data yet</div>';
+      renderDist(items);
+      return;
+    }
+    const recent = [...items].reverse().slice(0, 12);
+    list.innerHTML = recent.map((item, i) => {
+      const num  = items.length - i;
+      const cls  = TYPE_BADGE[item.type] || 'b-unknown';
+      const dot  = TYPE_DOT[item.type]   || 'd-muted';
+      const ts   = item.timestamp ? formatTs(item.timestamp) : '--:--';
+      return `
+        <div class="history-item${i === 0 ? ' new-item' : ''}">
+          <span class="h-idx">#${String(num).padStart(3,'0')}</span>
+          <span class="card-badge ${cls}" style="font-size:10px;padding:3px 8px">
+            <span class="dot ${dot}" style="width:6px;height:6px"></span>${item.type}
+          </span>
+          <span class="h-w">${item.weight || 0}g</span>
+          <span class="h-ts">${ts}</span>
+        </div>`;
+    }).join('');
+    renderDist(items);
+  };
+
+  function formatTs(ts) {
+    const n = Number(ts);
+    if (n > 1e9) {
+      const d = new Date(n);
+      return d.toLocaleTimeString('en-MY',{hour:'2-digit',minute:'2-digit'});
+    }
+    const sec = Math.floor(n / 1000);
+    const m   = Math.floor(sec / 60);
+    const s   = sec % 60;
+    return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  }
+
+  // ─── Distribution Chart ────────────────────────────────────────
+  function renderDist(items) {
+    const counts = { Paper:0, Plastic:0, Aluminum:0, Unknown:0 };
+    items.forEach(d => { if (counts[d.type] !== undefined) counts[d.type]++; });
+    const total = items.length || 1;
+    document.getElementById('distChart').innerHTML = Object.entries(counts).map(([k,v]) =>
+      `<div class="dist-row">
+        <div class="dist-lbl">${k}</div>
+        <div class="dist-track">
+          <div class="dist-fill" style="width:${Math.round(v/total*100)}%;background:${DIST_COLOR[k]}"></div>
+        </div>
+        <div class="dist-num">${v}</div>
+      </div>`
+    ).join('');
+  }
+
+  window.updateStats = function(items) {
+    renderDist(items);
+  };
+
+  // ─── Servo Animation ───────────────────────────────────────────
+  function animateSort(type) {
+    const seq = [];
+    if (type === 'Paper' || type === 'Plastic') {
+      seq.push({ a:[140,40,90,90],  d:0    });
+      seq.push({ a:[140,40, type==='Paper'?140:40, 90], d:600 });
+      seq.push({ a:[90,90,90,90],   d:1400 });
+    } else {
+      seq.push({ a:[40,140,90,90],  d:0    });
+      seq.push({ a:[40,140,90, type==='Unknown'?140:90], d:600 });
+      seq.push({ a:[90,90,90,90],   d:1400 });
+    }
+    seq.forEach(step => {
+      setTimeout(() => { servoAngles = step.a; renderServos(); }, step.d);
+    });
+  }
+
+  // ─── Buttons ───────────────────────────────────────────────────
+  window.handleSave = async function() {
+    if (currentWeight < 5 || currentType === 'Insert Waste' || currentType === 'Waiting...') {
+      toast('No valid waste detected', '#f85149');
+      return;
+    }
+    animateSort(currentType);
+    if (window.fbReady && window._fb) {
+      const { db, ref, set, push, serverTimestamp } = window._fb;
+      const count  = historyItems.length + 1;
+      const padded = count < 10 ? '00'+count : count < 100 ? '0'+count : ''+count;
+      await set(ref(db, `/history/item${padded}`), {
+        type: currentType, weight: currentWeight,
+        timestamp: String(Date.now())
+      });
+      await set(ref(db, '/current/type'),       'Insert Waste');
+      await set(ref(db, '/current/confidence'), 0);
+      await set(ref(db, '/current/processed'),  true);
+    }
+    toast('Saved & sorted to Firebase!', '#39d353');
+  };
+
+  window.handleTare = async function() {
+    updateWeight(0);
+    if (window.fbReady && window._fb) {
+      const { db, ref, set } = window._fb;
+      await set(ref(db, '/current/weight'), 0);
+    }
+    toast('Scale tared', '#58a6ff');
+  };
+
+  window.handleRefresh = function() {
+    location.reload();
+  };
+
+  window.simulateScan = function() {
+    const types = ['Paper','Plastic','Aluminum','Unknown'];
+    const t = types[Math.floor(Math.random() * 4)];
+    const w = Math.floor(Math.random() * 250) + 30;
+    const c = Math.random() * 0.3 + 0.7;
+    updateType(t);
+    updateWeight(w);
+    updateConfidence(c);
+    toast('Simulated: ' + t, '#f0a500');
+  };
+
+  window.handleReset = async function() {
+    updateType('Insert Waste');
+    updateWeight(0);
+    updateConfidence(0);
+    if (window.fbReady && window._fb) {
+      const { db, ref, set } = window._fb;
+      await set(ref(db, '/current/type'),       'Insert Waste');
+      await set(ref(db, '/current/confidence'), 0);
+      await set(ref(db, '/current/weight'),     0);
+      await set(ref(db, '/current/processed'),  false);
+    }
+    toast('Reset /current', '#f85149');
+  };
+
+  window.handleClearHistory = async function() {
+    if (!confirm('Clear ALL history from Firebase?')) return;
+    if (window.fbReady && window._fb) {
+      const { db, ref, set } = window._fb;
+      await set(ref(db, '/history'), null);
+    }
+    renderHistory([]);
+    toast('History cleared', '#f85149');
+  };
+
+  // ─── Init ──────────────────────────────────────────────────────
+  renderServos();
+  renderDist([]);
+  updateType('Insert Waste');
+</script>
+
+</body>
+</html>
